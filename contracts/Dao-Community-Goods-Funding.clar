@@ -33,11 +33,14 @@
 
 (define-map votes {proposal-id: uint, voter: principal} bool)
 (define-map member-votes principal uint)
+(define-map delegations {delegator: principal} {delegate: principal})
+(define-map delegation-power principal uint)
 
 (define-public (join-dao)
   (begin
     (map-set members tx-sender true)
     (map-set member-votes tx-sender u0)
+    (map-set delegation-power tx-sender u1)
     (ok true)
   )
 )
@@ -46,6 +49,8 @@
   (begin
     (map-delete members tx-sender)
     (map-delete member-votes tx-sender)
+    (map-delete delegations {delegator: tx-sender})
+    (map-delete delegation-power tx-sender)
     (ok true)
   )
 )
@@ -99,6 +104,7 @@
       (proposal (unwrap! (map-get? proposals proposal-id) ERR_INVALID_PROPOSAL))
       (current-block stacks-block-height)
       (vote-key {proposal-id: proposal-id, voter: tx-sender})
+      (voting-power (default-to u1 (map-get? delegation-power tx-sender)))
     )
     (asserts! (default-to false (map-get? members tx-sender)) ERR_NOT_MEMBER)
     (asserts! (is-none (map-get? votes vote-key)) ERR_ALREADY_VOTED)
@@ -108,10 +114,10 @@
     
     (if support
       (map-set proposals proposal-id 
-        (merge proposal {votes-for: (+ (get votes-for proposal) u1)})
+        (merge proposal {votes-for: (+ (get votes-for proposal) voting-power)})
       )
       (map-set proposals proposal-id 
-        (merge proposal {votes-against: (+ (get votes-against proposal) u1)})
+        (merge proposal {votes-against: (+ (get votes-against proposal) voting-power)})
       )
     )
     
@@ -199,6 +205,47 @@
 
 (define-read-only (get-member-vote-count (member principal))
   (default-to u0 (map-get? member-votes member))
+)
+
+(define-public (delegate-vote (delegate principal))
+  (let 
+    (
+      (current-power (default-to u1 (map-get? delegation-power tx-sender)))
+      (delegate-power (default-to u1 (map-get? delegation-power delegate)))
+    )
+    (asserts! (default-to false (map-get? members tx-sender)) ERR_NOT_MEMBER)
+    (asserts! (default-to false (map-get? members delegate)) ERR_NOT_MEMBER)
+    (asserts! (not (is-eq tx-sender delegate)) ERR_INVALID_PROPOSAL)
+    
+    (map-set delegations {delegator: tx-sender} {delegate: delegate})
+    (map-set delegation-power delegate (+ delegate-power current-power))
+    (map-set delegation-power tx-sender u0)
+    (ok true)
+  )
+)
+
+(define-public (revoke-delegation)
+  (let 
+    (
+      (delegation-info (unwrap! (map-get? delegations {delegator: tx-sender}) ERR_INVALID_PROPOSAL))
+      (delegate (get delegate delegation-info))
+      (current-power (default-to u1 (map-get? delegation-power delegate)))
+    )
+    (asserts! (default-to false (map-get? members tx-sender)) ERR_NOT_MEMBER)
+    
+    (map-delete delegations {delegator: tx-sender})
+    (map-set delegation-power delegate (- current-power u1))
+    (map-set delegation-power tx-sender u1)
+    (ok true)
+  )
+)
+
+(define-read-only (get-delegation (delegator principal))
+  (map-get? delegations {delegator: delegator})
+)
+
+(define-read-only (get-voting-power (member principal))
+  (default-to u0 (map-get? delegation-power member))
 )
 
 (define-read-only (is-proposal-passed (proposal-id uint))
