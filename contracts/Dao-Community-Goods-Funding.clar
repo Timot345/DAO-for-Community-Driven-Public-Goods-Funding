@@ -8,11 +8,14 @@
 (define-constant ERR_INSUFFICIENT_FUNDS (err u106))
 (define-constant ERR_NOT_MEMBER (err u107))
 (define-constant ERR_PROPOSAL_ACTIVE (err u108))
+(define-constant ERR_TIME_LOCK_ACTIVE (err u109))
 
 (define-data-var proposal-counter uint u0)
 (define-data-var treasury uint u0)
 (define-data-var voting-period uint u1440)
 (define-data-var min-votes-required uint u3)
+(define-data-var time-lock-threshold uint u1000000)
+(define-data-var time-lock-period uint u144)
 
 (define-map members principal bool)
 (define-map proposals 
@@ -27,7 +30,8 @@
     end-block: uint,
     votes-for: uint,
     votes-against: uint,
-    executed: bool
+    executed: bool,
+    time-locked-until: (optional uint)
   }
 )
 
@@ -90,7 +94,8 @@
         end-block: end-block,
         votes-for: u0,
         votes-against: u0,
-        executed: false
+        executed: false,
+        time-locked-until: none
       }
     )
     (var-set proposal-counter proposal-id)
@@ -140,6 +145,13 @@
     (asserts! (>= total-votes (var-get min-votes-required)) ERR_PROPOSAL_NOT_PASSED)
     (asserts! (> (get votes-for proposal) (get votes-against proposal)) ERR_PROPOSAL_NOT_PASSED)
     (asserts! (<= (get amount proposal) (var-get treasury)) ERR_INSUFFICIENT_FUNDS)
+    (asserts! 
+      (match (get time-locked-until proposal)
+        time-lock-block (>= current-block time-lock-block)
+        true
+      )
+      ERR_TIME_LOCK_ACTIVE
+    )
     
     (try! (as-contract (stx-transfer? (get amount proposal) tx-sender (get recipient proposal))))
     (var-set treasury (- (var-get treasury) (get amount proposal)))
@@ -161,6 +173,44 @@
   (begin
     (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
     (var-set min-votes-required new-min)
+    (ok true)
+  )
+)
+
+(define-public (activate-time-lock (proposal-id uint))
+  (let 
+    (
+      (proposal (unwrap! (map-get? proposals proposal-id) ERR_INVALID_PROPOSAL))
+      (current-block stacks-block-height)
+      (total-votes (+ (get votes-for proposal) (get votes-against proposal)))
+      (time-lock-until (+ current-block (var-get time-lock-period)))
+    )
+    (asserts! (>= current-block (get end-block proposal)) ERR_PROPOSAL_ACTIVE)
+    (asserts! (not (get executed proposal)) ERR_ALREADY_EXECUTED)
+    (asserts! (>= total-votes (var-get min-votes-required)) ERR_PROPOSAL_NOT_PASSED)
+    (asserts! (> (get votes-for proposal) (get votes-against proposal)) ERR_PROPOSAL_NOT_PASSED)
+    (asserts! (>= (get amount proposal) (var-get time-lock-threshold)) ERR_INVALID_PROPOSAL)
+    (asserts! (is-none (get time-locked-until proposal)) ERR_ALREADY_EXECUTED)
+    
+    (map-set proposals proposal-id 
+      (merge proposal {time-locked-until: (some time-lock-until)})
+    )
+    (ok time-lock-until)
+  )
+)
+
+(define-public (update-time-lock-threshold (new-threshold uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (var-set time-lock-threshold new-threshold)
+    (ok true)
+  )
+)
+
+(define-public (update-time-lock-period (new-period uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (var-set time-lock-period new-period)
     (ok true)
   )
 )
@@ -197,6 +247,14 @@
 
 (define-read-only (get-min-votes-required)
   (var-get min-votes-required)
+)
+
+(define-read-only (get-time-lock-threshold)
+  (var-get time-lock-threshold)
+)
+
+(define-read-only (get-time-lock-period)
+  (var-get time-lock-period)
 )
 
 (define-read-only (get-proposal-count)
