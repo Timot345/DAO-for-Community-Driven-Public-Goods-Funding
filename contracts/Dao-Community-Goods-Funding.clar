@@ -39,12 +39,14 @@
 (define-map member-votes principal uint)
 (define-map delegations {delegator: principal} {delegate: principal})
 (define-map delegation-power principal uint)
+(define-map reputation-stats principal {total-proposals: uint, successful-proposals: uint})
 
 (define-public (join-dao)
   (begin
     (map-set members tx-sender true)
     (map-set member-votes tx-sender u0)
     (map-set delegation-power tx-sender u1)
+    (map-set reputation-stats tx-sender {total-proposals: u0, successful-proposals: u0})
     (ok true)
   )
 )
@@ -55,6 +57,7 @@
     (map-delete member-votes tx-sender)
     (map-delete delegations {delegator: tx-sender})
     (map-delete delegation-power tx-sender)
+    (map-delete reputation-stats tx-sender)
     (ok true)
   )
 )
@@ -99,6 +102,11 @@
       }
     )
     (var-set proposal-counter proposal-id)
+    (let ((current-stats (default-to {total-proposals: u0, successful-proposals: u0} (map-get? reputation-stats tx-sender))))
+      (map-set reputation-stats tx-sender 
+        (merge current-stats {total-proposals: (+ (get total-proposals current-stats) u1)})
+      )
+    )
     (ok proposal-id)
   )
 )
@@ -139,10 +147,19 @@
       (proposal (unwrap! (map-get? proposals proposal-id) ERR_INVALID_PROPOSAL))
       (current-block stacks-block-height)
       (total-votes (+ (get votes-for proposal) (get votes-against proposal)))
+      (proposer-stats (default-to {total-proposals: u0, successful-proposals: u0} (map-get? reputation-stats (get proposer proposal))))
+      (reputation-score (if (> (get total-proposals proposer-stats) u0) 
+                         (/ (* (get successful-proposals proposer-stats) u100) (get total-proposals proposer-stats))
+                         u50))
+      (adjusted-min-votes (if (>= reputation-score u75)
+                           (/ (var-get min-votes-required) u2)
+                           (if (< reputation-score u25)
+                             (* (var-get min-votes-required) u2)
+                             (var-get min-votes-required))))
     )
     (asserts! (>= current-block (get end-block proposal)) ERR_PROPOSAL_ACTIVE)
     (asserts! (not (get executed proposal)) ERR_ALREADY_EXECUTED)
-    (asserts! (>= total-votes (var-get min-votes-required)) ERR_PROPOSAL_NOT_PASSED)
+    (asserts! (>= total-votes adjusted-min-votes) ERR_PROPOSAL_NOT_PASSED)
     (asserts! (> (get votes-for proposal) (get votes-against proposal)) ERR_PROPOSAL_NOT_PASSED)
     (asserts! (<= (get amount proposal) (var-get treasury)) ERR_INSUFFICIENT_FUNDS)
     (asserts! 
@@ -155,6 +172,12 @@
     
     (try! (as-contract (stx-transfer? (get amount proposal) tx-sender (get recipient proposal))))
     (var-set treasury (- (var-get treasury) (get amount proposal)))
+    
+    (let ((proposer-rep-stats (default-to {total-proposals: u0, successful-proposals: u0} (map-get? reputation-stats (get proposer proposal)))))
+      (map-set reputation-stats (get proposer proposal)
+        (merge proposer-rep-stats {successful-proposals: (+ (get successful-proposals proposer-rep-stats) u1)})
+      )
+    )
     
     (map-set proposals proposal-id (merge proposal {executed: true}))
     (ok true)
@@ -324,6 +347,39 @@
   )
 )
 
+(define-read-only (get-reputation-stats (member principal))
+  (default-to {total-proposals: u0, successful-proposals: u0} (map-get? reputation-stats member))
+)
+
+(define-read-only (calculate-reputation-score (member principal))
+  (let 
+    (
+      (stats (get-reputation-stats member))
+      (total (get total-proposals stats))
+      (successful (get successful-proposals stats))
+    )
+    (if (> total u0) 
+      (/ (* successful u100) total)
+      u50
+    )
+  )
+)
+
+(define-read-only (get-adjusted-min-votes (proposer principal))
+  (let 
+    (
+      (reputation-score (calculate-reputation-score proposer))
+    )
+    (if (>= reputation-score u75)
+      (/ (var-get min-votes-required) u2)
+      (if (< reputation-score u25)
+        (* (var-get min-votes-required) u2)
+        (var-get min-votes-required)
+      )
+    )
+  )
+)
+
 (define-read-only (get-proposal-status (proposal-id uint))
   (match (map-get? proposals proposal-id)
     proposal
@@ -332,7 +388,8 @@
         (current-block stacks-block-height)
         (total-votes (+ (get votes-for proposal) (get votes-against proposal)))
         (is-active (< current-block (get end-block proposal)))
-        (has-min-votes (>= total-votes (var-get min-votes-required)))
+        (adjusted-min-votes (get-adjusted-min-votes (get proposer proposal)))
+        (has-min-votes (>= total-votes adjusted-min-votes))
         (is-approved (> (get votes-for proposal) (get votes-against proposal)))
       )
       {
@@ -342,6 +399,7 @@
         votes-for: (get votes-for proposal),
         votes-against: (get votes-against proposal),
         total-votes: total-votes,
+        adjusted-min-votes: adjusted-min-votes,
         blocks-remaining: (if is-active (- (get end-block proposal) current-block) u0)
       }
     )
@@ -352,6 +410,7 @@
       votes-for: u0,
       votes-against: u0,
       total-votes: u0,
+      adjusted-min-votes: (var-get min-votes-required),
       blocks-remaining: u0
     }
   )
