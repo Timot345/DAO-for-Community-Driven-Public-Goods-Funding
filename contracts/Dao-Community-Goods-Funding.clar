@@ -13,6 +13,9 @@
 (define-constant ERR_MILESTONE_NOT_READY (err u111))
 (define-constant ERR_MILESTONE_COMPLETED (err u112))
 (define-constant ERR_NOT_RECIPIENT (err u113))
+(define-constant ERR_NO_DONATION (err u114))
+(define-constant ERR_CANNOT_RECLAIM (err u115))
+(define-constant ERR_MILESTONE_PROPOSAL (err u116))
 
 (define-data-var proposal-counter uint u0)
 (define-data-var treasury uint u0)
@@ -63,6 +66,8 @@
 (define-map milestone-verification-votes {proposal-id: uint, milestone-index: uint, voter: principal} bool)
 
 (define-map milestone-proposals uint bool)
+(define-map donations {proposal-id: uint, donor: principal} uint)
+(define-map proposal-total-donations uint uint)
 
 (define-public (join-dao)
   (begin
@@ -179,12 +184,14 @@
                            (if (< reputation-score u25)
                              (* (var-get min-votes-required) u2)
                              (var-get min-votes-required))))
+      (donation-total (default-to u0 (map-get? proposal-total-donations proposal-id)))
     )
     (asserts! (>= current-block (get end-block proposal)) ERR_PROPOSAL_ACTIVE)
     (asserts! (not (get executed proposal)) ERR_ALREADY_EXECUTED)
     (asserts! (>= total-votes adjusted-min-votes) ERR_PROPOSAL_NOT_PASSED)
     (asserts! (> (get votes-for proposal) (get votes-against proposal)) ERR_PROPOSAL_NOT_PASSED)
     (asserts! (<= (get amount proposal) (var-get treasury)) ERR_INSUFFICIENT_FUNDS)
+    (asserts! (not (default-to false (map-get? milestone-proposals proposal-id))) ERR_MILESTONE_PROPOSAL)
     (asserts! 
       (match (get time-locked-until proposal)
         time-lock-block (>= current-block time-lock-block)
@@ -193,7 +200,7 @@
       ERR_TIME_LOCK_ACTIVE
     )
     
-    (try! (as-contract (stx-transfer? (get amount proposal) tx-sender (get recipient proposal))))
+    (try! (as-contract (stx-transfer? (+ (get amount proposal) donation-total) tx-sender (get recipient proposal))))
     (var-set treasury (- (var-get treasury) (get amount proposal)))
     
     (let ((proposer-rep-stats (default-to {total-proposals: u0, successful-proposals: u0} (map-get? reputation-stats (get proposer proposal)))))
@@ -728,4 +735,51 @@
     )
     acc
   )
+)
+
+(define-public (donate-to-proposal (proposal-id uint) (amount uint))
+  (let 
+    (
+      (proposal (unwrap! (map-get? proposals proposal-id) ERR_INVALID_PROPOSAL))
+      (current-block stacks-block-height)
+      (current-donation (default-to u0 (map-get? donations {proposal-id: proposal-id, donor: tx-sender})))
+      (current-total (default-to u0 (map-get? proposal-total-donations proposal-id)))
+    )
+    (asserts! (not (default-to false (map-get? milestone-proposals proposal-id))) ERR_MILESTONE_PROPOSAL)
+    (asserts! (< current-block (get end-block proposal)) ERR_VOTING_CLOSED)
+    (asserts! (> amount u0) ERR_INVALID_PROPOSAL)
+    
+    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+    
+    (map-set donations {proposal-id: proposal-id, donor: tx-sender} (+ current-donation amount))
+    (map-set proposal-total-donations proposal-id (+ current-total amount))
+    (ok true)
+  )
+)
+
+(define-public (reclaim-donation (proposal-id uint))
+  (let 
+    (
+      (proposal (unwrap! (map-get? proposals proposal-id) ERR_INVALID_PROPOSAL))
+      (current-block stacks-block-height)
+      (donation-amount (default-to u0 (map-get? donations {proposal-id: proposal-id, donor: tx-sender})))
+      (passed (is-proposal-passed proposal-id))
+    )
+    (asserts! (>= current-block (get end-block proposal)) ERR_PROPOSAL_ACTIVE)
+    (asserts! (not passed) ERR_CANNOT_RECLAIM)
+    (asserts! (> donation-amount u0) ERR_NO_DONATION)
+    
+    (try! (as-contract (stx-transfer? donation-amount tx-sender tx-sender)))
+    
+    (map-set donations {proposal-id: proposal-id, donor: tx-sender} u0)
+    (ok true)
+  )
+)
+
+(define-read-only (get-donation (proposal-id uint) (donor principal))
+  (default-to u0 (map-get? donations {proposal-id: proposal-id, donor: donor}))
+)
+
+(define-read-only (get-total-donations (proposal-id uint))
+  (default-to u0 (map-get? proposal-total-donations proposal-id))
 )
